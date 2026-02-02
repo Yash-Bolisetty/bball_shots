@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Shot Tracker</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <!-- Navigation -->
+  <nav id="nav">
+    <button class="nav-tab active" data-screen="tracker">Tracker</button>
+    <button class="nav-tab" data-screen="viewer">Viewer</button>
+  </nav>
+
+  <!-- ===== Screen 1: Live Tracker ===== -->
+  <div id="screen-tracker" class="screen active">
+
+    <!-- Header -->
+    <header class="tracker-header">
+      <div class="header-left">
+        <h1>Shot Tracker</h1>
+      </div>
+      <div class="header-right">
+        <span id="session-timer">00:00</span>
+        <span id="recording-dot" class="recording-dot hidden"></span>
+      </div>
+    </header>
+
+    <!-- Realtime Waveform -->
+    <div class="chart-container">
+      <canvas id="waveform-canvas"></canvas>
+    </div>
+
+    <!-- Stats Row -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">GPS Acc</div>
+        <div class="stat-value" id="stat-gps">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Distance</div>
+        <div class="stat-value" id="stat-dist">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Zone</div>
+        <div class="stat-value" id="stat-zone">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Shots</div>
+        <div class="stat-value" id="stat-shots">0</div>
+      </div>
+    </div>
+
+    <!-- Movement Bar -->
+    <div class="movement-bar">
+      <span id="movement-icon" class="movement-icon">&#9899;</span>
+      <div class="movement-progress-wrap">
+        <div class="movement-progress" id="movement-progress"></div>
+      </div>
+      <span id="movement-label" class="movement-label">Still</span>
+    </div>
+
+    <!-- Court Canvas -->
+    <div class="court-container">
+      <canvas id="court-canvas"></canvas>
+    </div>
+
+    <!-- Controls Row -->
+    <div class="controls-row">
+      <button id="btn-start" class="btn btn-primary">START</button>
+      <div class="dropdown">
+        <button id="btn-calibrate" class="btn btn-secondary" disabled>Calibrate</button>
+        <div class="dropdown-menu" id="calibrate-menu">
+          <button data-cal="rim">Rim</button>
+          <button data-cal="top3">Top of Key 3</button>
+          <button data-cal="left">Left Corner</button>
+          <button data-cal="right">Right Corner</button>
+        </div>
+      </div>
+      <div class="dropdown">
+        <button id="btn-anchor" class="btn btn-secondary" disabled>Anchor</button>
+        <div class="dropdown-menu" id="anchor-menu">
+          <button data-anchor="rim">Rim</button>
+          <button data-anchor="ft">Free Throw</button>
+          <button data-anchor="top3">Top 3</button>
+          <button data-anchor="left3">Left Corner 3</button>
+          <button data-anchor="right3">Right Corner 3</button>
+        </div>
+      </div>
+      <button id="btn-export" class="btn btn-secondary" disabled>Export</button>
+    </div>
+
+    <!-- Zone Confirmation Popup -->
+    <div id="zone-confirm" class="zone-confirm hidden">
+      <div class="zone-confirm-inner">
+        <div class="zone-confirm-title">Shot Detected!</div>
+        <div class="zone-confirm-zone" id="zone-confirm-zone">--</div>
+        <div class="zone-confirm-actions">
+          <button id="zone-confirm-yes" class="btn btn-sm btn-primary">Correct</button>
+          <button id="zone-confirm-no" class="btn btn-sm btn-secondary">Wrong</button>
+        </div>
+        <div class="zone-confirm-timer" id="zone-confirm-timer"></div>
+      </div>
+    </div>
+
+    <!-- Shot Log -->
+    <div class="shot-log">
+      <h3>Shot Log</h3>
+      <div id="shot-log-list" class="shot-log-list"></div>
+    </div>
+  </div>
+
+  <!-- ===== Screen 2: Data Viewer ===== -->
+  <div id="screen-viewer" class="screen">
+
+    <!-- File Loader (shown when no file loaded) -->
+    <div id="viewer-loader" class="viewer-loader">
+      <div id="drop-zone" class="drop-zone">
+        <div class="drop-zone-text">
+          <div class="drop-icon">&#128194;</div>
+          <p>Drop a session JSON file here</p>
+          <p class="drop-sub">or</p>
+          <button id="btn-pick-file" class="btn btn-primary">Choose File</button>
+          <input type="file" id="file-input" accept=".json" hidden>
+        </div>
+      </div>
+    </div>
+
+    <!-- Viewer Content (shown when file is loaded) -->
+    <div id="viewer-content" class="viewer-content hidden">
+
+      <!-- Toolbar -->
+      <div class="viewer-toolbar">
+        <button id="btn-load-new" class="btn btn-secondary btn-sm">Load New</button>
+        <span id="viewer-filename" class="viewer-filename"></span>
+        <div class="toolbar-spacer"></div>
+        <button id="btn-rerun" class="btn btn-secondary btn-sm">Re-run Detection</button>
+        <button id="btn-add-shot" class="btn btn-secondary btn-sm">+ Add Shot</button>
+        <button id="btn-add-segment" class="btn btn-secondary btn-sm">+ Segment</button>
+        <button id="btn-undo" class="btn btn-secondary btn-sm" disabled>Undo</button>
+        <button id="btn-viewer-export" class="btn btn-primary btn-sm">Export</button>
+      </div>
+
+      <!-- Signal Chart -->
+      <div class="signal-chart-container">
+        <canvas id="minimap-canvas" class="minimap-canvas"></canvas>
+        <canvas id="signal-canvas" class="signal-canvas"></canvas>
+      </div>
+
+      <!-- Shot / Annotation Panel -->
+      <div class="viewer-panel">
+        <div class="panel-tabs">
+          <button class="panel-tab active" data-panel="shots">Shots</button>
+          <button class="panel-tab" data-panel="segments">Segments</button>
+        </div>
+
+        <div id="panel-shots" class="panel-content active">
+          <div id="viewer-shot-list" class="viewer-shot-list"></div>
+        </div>
+
+        <div id="panel-segments" class="panel-content">
+          <div id="viewer-segment-list" class="viewer-segment-list"></div>
+        </div>
+      </div>
+
+      <!-- Segment Label Modal -->
+      <div id="segment-modal" class="modal hidden">
+        <div class="modal-content">
+          <h3>Label Segment</h3>
+          <div class="segment-label-options">
+            <button data-seg-label="dribble" class="btn btn-sm">Dribble</button>
+            <button data-seg-label="walking" class="btn btn-sm">Walking</button>
+            <button data-seg-label="jogging" class="btn btn-sm">Jogging</button>
+            <button data-seg-label="shooting" class="btn btn-sm">Shooting</button>
+            <button data-seg-label="stationary" class="btn btn-sm">Stationary</button>
+          </div>
+          <div class="modal-custom">
+            <input type="text" id="segment-custom-label" placeholder="Custom label...">
+          </div>
+          <div class="modal-actions">
+            <button id="segment-cancel" class="btn btn-sm btn-secondary">Cancel</button>
+            <button id="segment-save" class="btn btn-sm btn-primary">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Zone Edit Modal -->
+      <div id="zone-edit-modal" class="modal hidden">
+        <div class="modal-content">
+          <h3>Edit Shot Zone</h3>
+          <div class="zone-edit-options" id="zone-edit-options"></div>
+          <div class="modal-actions">
+            <button id="zone-edit-cancel" class="btn btn-sm btn-secondary">Cancel</button>
+            <button id="zone-edit-save" class="btn btn-sm btn-primary">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/core.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/viewer.js"></script>
+  <script src="js/tracker.js"></script>
+</body>
+</html>
