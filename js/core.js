@@ -176,8 +176,11 @@ const DIP_SEARCH_WINDOW = 35;
 const RECOVERY_SEARCH_WINDOW = 30;
 const SCAN_START_OFFSET = 90;  // from end
 const SCAN_END_OFFSET = 50;    // from end
-const MIN_SHOT_INTERVAL_MS = 1500;
-const MIN_SHOT_SAMPLES = 80;
+const MIN_SHOT_INTERVAL_MS = 1200;
+const MIN_SHOT_SAMPLES = 60;
+const MAX_EFFECTIVE_STD = 1.5; // Cap std for peak/range/recovery thresholds only
+                                // Prevents nearby shots from inflating baseline std
+                                // Real std still used for dip threshold (stricter when noisy)
 
 class ShotDetector {
   constructor() {
@@ -230,7 +233,10 @@ class ShotDetector {
       const base = this._baseline(aMags, baseEnd);
       if (!base) continue;
 
-      const peakThreshold = base.mean + PEAK_SIGMA * base.std;
+      // Capped std for peak/range/recovery; real std for dip (stays strict when noisy)
+      const effStd = Math.min(base.std, MAX_EFFECTIVE_STD);
+
+      const peakThreshold = base.mean + PEAK_SIGMA * effStd;
       if (aMags[i] < peakThreshold || aMags[i] < MIN_PEAK_ABS) continue;
 
       // Enforce min samples between shots
@@ -252,7 +258,7 @@ class ShotDetector {
 
       // Peak-to-dip range
       const peakToDipRange = aMags[i] - aMags[dipIdx];
-      const minRange = Math.max(MIN_PEAK_TO_DIP_ABS, base.std * PEAK_TO_DIP_SIGMA);
+      const minRange = Math.max(MIN_PEAK_TO_DIP_ABS, effStd * PEAK_TO_DIP_SIGMA);
       if (peakToDipRange < minRange) continue;
 
       // Find recovery peak
@@ -263,7 +269,7 @@ class ShotDetector {
         if (aMags[j] > aMags[recIdx]) recIdx = j;
       }
 
-      const recThreshold = base.mean + RECOVERY_SIGMA * base.std;
+      const recThreshold = base.mean + RECOVERY_SIGMA * effStd;
       const riseFromDip = aMags[recIdx] - aMags[dipIdx];
       if (aMags[recIdx] < recThreshold || riseFromDip < MIN_RISE_FROM_DIP) continue;
 
@@ -293,7 +299,9 @@ class ShotDetector {
     const base = this._baseline(aMags, baseEnd);
     if (!base) return null;
 
-    const peakThreshold = base.mean + PEAK_SIGMA * base.std;
+    const effStd = Math.min(base.std, MAX_EFFECTIVE_STD);
+
+    const peakThreshold = base.mean + PEAK_SIGMA * effStd;
     if (aMags[i] < peakThreshold || aMags[i] < MIN_PEAK_ABS) return null;
 
     // Enforce minimum intervals
@@ -314,7 +322,7 @@ class ShotDetector {
 
     // Peak-to-dip range
     const peakToDipRange = aMags[i] - aMags[dipIdx];
-    const minRange = Math.max(MIN_PEAK_TO_DIP_ABS, base.std * PEAK_TO_DIP_SIGMA);
+    const minRange = Math.max(MIN_PEAK_TO_DIP_ABS, effStd * PEAK_TO_DIP_SIGMA);
     if (peakToDipRange < minRange) return null;
 
     // Find recovery
@@ -325,7 +333,7 @@ class ShotDetector {
       if (aMags[j] > aMags[recIdx]) recIdx = j;
     }
 
-    const recThreshold = base.mean + RECOVERY_SIGMA * base.std;
+    const recThreshold = base.mean + RECOVERY_SIGMA * effStd;
     const riseFromDip = aMags[recIdx] - aMags[dipIdx];
     if (aMags[recIdx] < recThreshold || riseFromDip < MIN_RISE_FROM_DIP) return null;
 
