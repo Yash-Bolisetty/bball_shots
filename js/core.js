@@ -186,6 +186,9 @@ class ShotDetector {
   constructor() {
     this.lastShotTime = 0;
     this.lastShotIdx = -Infinity;
+    this.calibration = null;  // Set from MotionCalibrator.load() to enable post-filter
+    this.useConsensus = false; // Enable multi-detector consensus
+    this.consensusOpts = {};   // Options for consensus detectors
   }
 
   // Compute baseline stats from a slice of aMag values
@@ -273,6 +276,25 @@ class ShotDetector {
       const riseFromDip = aMags[recIdx] - aMags[dipIdx];
       if (aMags[recIdx] < recThreshold || riseFromDip < MIN_RISE_FROM_DIP) continue;
 
+      // Three-phase passed — apply post-filters
+
+      // Multi-detector consensus
+      let consensus = null;
+      if (this.useConsensus) {
+        consensus = ShotDetectorConsensus.evaluate(aMags, i, dipIdx, recIdx, this.consensusOpts);
+        if (!consensus.isShot) continue;
+      }
+
+      // Calibration post-filter
+      let calibResult = null;
+      if (this.calibration) {
+        const features = MotionCalibrator._extractFeatures(imuData, i, dipIdx, recIdx, base.mean);
+        if (features) {
+          calibResult = MotionCalibrator.classify(features, this.calibration);
+          if (!calibResult.isShot) continue;
+        }
+      }
+
       // Shot detected!
       shots.push({
         idx: i,
@@ -282,6 +304,8 @@ class ShotDetector {
         range: peakToDipRange,
         t: imuData[i].t,
         tRel: imuData[i].tRel,
+        consensus,
+        calibResult,
       });
 
       lastIdx = i;
@@ -337,6 +361,25 @@ class ShotDetector {
     const riseFromDip = aMags[recIdx] - aMags[dipIdx];
     if (aMags[recIdx] < recThreshold || riseFromDip < MIN_RISE_FROM_DIP) return null;
 
+    // Three-phase passed — apply post-filters
+
+    // Multi-detector consensus
+    let consensus = null;
+    if (this.useConsensus) {
+      consensus = ShotDetectorConsensus.evaluate(aMags, i, dipIdx, recIdx, this.consensusOpts);
+      if (!consensus.isShot) return null;
+    }
+
+    // Calibration post-filter
+    let calibResult = null;
+    if (this.calibration) {
+      const features = MotionCalibrator._extractFeatures(buffer.data, i, dipIdx, recIdx, base.mean);
+      if (features) {
+        calibResult = MotionCalibrator.classify(features, this.calibration);
+        if (!calibResult.isShot) return null;
+      }
+    }
+
     // Shot detected!
     this.lastShotTime = currentTime;
     this.lastShotIdx = absIdx;
@@ -349,6 +392,8 @@ class ShotDetector {
       recoveryMag: aMags[recIdx],
       range: peakToDipRange,
       t: currentTime,
+      consensus,
+      calibResult,
     };
   }
 
@@ -431,6 +476,444 @@ class Session {
     s.segments = data.segments || [];
     s.userEdits = data.userEdits || null;
     return s;
+  }
+}
+
+
+// ===== Motion Calibrator =====
+const CALIB_STORAGE_KEY = 'bball_motion_calibration';
+
+class MotionCalibrator {
+  // --- Pattern extraction with relaxed thresholds ---
+  static extractPatterns(imuData, label) {
+    const aMags = imuData.map(s => s.aMag);
+    if (aMags.length < 60) return [];
+
+    // Global stats for relaxed thresholds
+    const globalMean = aMags.reduce((a, b) => a + b, 0) / aMags.length;
+    const globalVar = aMags.reduce((a, v) => a + (v - globalMean) ** 2, 0) / aMags.length;
+    const globalStd = Math.sqrt(globalVar);
+
+    const peakThresh = Math.max(globalMean + 1.0 * globalStd, 11.0);
+    const minDrop = 3.0;
+    const minRise = 2.0;
+    const minSpacing = 20;
+
+    const patterns = [];
+    let lastPeakIdx = -Infinity;
+
+    for (let i = 2; i < aMags.length - DIP_SEARCH_WINDOW - RECOVERY_SEARCH_WINDOW; i++) {
+      // Local max check
+      if (aMags[i] <= aMags[i - 1] || aMags[i] < aMags[i + 1]) continue;
+      if (aMags[i] < peakThresh) continue;
+      if (i - lastPeakIdx < minSpacing) continue;
+
+      // Baseline for this peak
+      const baseEnd = Math.max(0, i - BASELINE_OFFSET);
+      const baseStart = Math.max(0, baseEnd - BASELINE_WINDOW);
+      const baseSlice = aMags.slice(baseStart, baseEnd);
+      if (baseSlice.length < 10) continue;
+      const baseMean = baseSlice.reduce((a, b) => a + b, 0) / baseSlice.length;
+
+      // Find dip
+      const dipEnd = Math.min(aMags.length, i + DIP_SEARCH_WINDOW);
+      let dipIdx = i + 1;
+      if (dipIdx >= dipEnd) continue;
+      for (let j = i + 1; j < dipEnd; j++) {
+        if (aMags[j] < aMags[dipIdx]) dipIdx = j;
+      }
+
+      const drop = aMags[i] - aMags[dipIdx];
+      if (drop < minDrop) continue;
+
+      // Find recovery
+      const recEnd = Math.min(aMags.length, dipIdx + RECOVERY_SEARCH_WINDOW);
+      let recIdx = dipIdx + 1;
+      if (recIdx >= recEnd) continue;
+      for (let j = dipIdx + 1; j < recEnd; j++) {
+        if (aMags[j] > aMags[recIdx]) recIdx = j;
+      }
+
+      const rise = aMags[recIdx] - aMags[dipIdx];
+      if (rise < minRise) continue;
+
+      // Extract 12-dimension feature vector
+      const features = MotionCalibrator._extractFeatures(imuData, i, dipIdx, recIdx, baseMean);
+      if (features) {
+        features.label = label;
+        features.idx = i;
+        patterns.push(features);
+        lastPeakIdx = i;
+      }
+    }
+
+    return patterns;
+  }
+
+  // --- Extract 12-dim feature vector from IMU data around a detected pattern ---
+  static _extractFeatures(imuData, peakIdx, dipIdx, recIdx, baselineMean) {
+    if (peakIdx < 0 || dipIdx >= imuData.length || recIdx >= imuData.length) return null;
+
+    const peakSample = imuData[peakIdx];
+    const dipSample = imuData[dipIdx];
+    const recSample = imuData[recIdx];
+
+    if (!peakSample || !dipSample || !recSample) return null;
+
+    const peakMag = peakSample.aMag;
+    const dipMag = dipSample.aMag;
+    const recoveryMag = recSample.aMag;
+    const range = peakMag - dipMag;
+    const dipRatio = baselineMean > 0 ? dipMag / baselineMean : 1.0;
+
+    // Timing
+    const peakToDipSamples = dipIdx - peakIdx;
+    const dipToRecSamples = recIdx - dipIdx;
+    const totalDuration = recIdx - peakIdx;
+
+    // Gyroscope features
+    const gyroMag = (s) => {
+      const gx = s.gx || 0, gy = s.gy || 0, gz = s.gz || 0;
+      return Math.sqrt(gx * gx + gy * gy + gz * gz);
+    };
+
+    const gyroMagAtPeak = gyroMag(peakSample);
+    const gyroMagAtDip = gyroMag(dipSample);
+
+    // Max gyro in window [peak-5 .. recovery+5]
+    let maxGyroInWindow = 0;
+    const winStart = Math.max(0, peakIdx - 5);
+    const winEnd = Math.min(imuData.length - 1, recIdx + 5);
+    for (let j = winStart; j <= winEnd; j++) {
+      const g = gyroMag(imuData[j]);
+      if (g > maxGyroInWindow) maxGyroInWindow = g;
+    }
+
+    // Mean gyro from dip to recovery
+    let gyroSum = 0;
+    let gyroCount = 0;
+    for (let j = dipIdx; j <= recIdx; j++) {
+      gyroSum += gyroMag(imuData[j]);
+      gyroCount++;
+    }
+    const gyroDipToRec = gyroCount > 0 ? gyroSum / gyroCount : 0;
+
+    return {
+      peakMag,
+      dipMag,
+      recoveryMag,
+      range,
+      dipRatio,
+      peakToDipSamples,
+      dipToRecSamples,
+      totalDuration,
+      gyroMagAtPeak,
+      gyroMagAtDip,
+      maxGyroInWindow,
+      gyroDipToRec,
+    };
+  }
+
+  // --- Compute per-feature stats from a set of patterns ---
+  static computeProfile(patterns) {
+    if (!patterns || patterns.length === 0) return null;
+
+    const featureKeys = [
+      'peakMag', 'dipMag', 'recoveryMag', 'range', 'dipRatio',
+      'peakToDipSamples', 'dipToRecSamples', 'totalDuration',
+      'gyroMagAtPeak', 'gyroMagAtDip', 'maxGyroInWindow', 'gyroDipToRec',
+    ];
+
+    const profile = { count: patterns.length };
+
+    for (const key of featureKeys) {
+      const vals = patterns.map(p => p[key]).filter(v => v != null && !isNaN(v));
+      if (vals.length === 0) {
+        profile[key] = { mean: 0, std: 0, min: 0, max: 0 };
+        continue;
+      }
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const variance = vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length;
+      const std = Math.sqrt(variance);
+      profile[key] = {
+        mean,
+        std,
+        min: Math.min(...vals),
+        max: Math.max(...vals),
+      };
+    }
+
+    return profile;
+  }
+
+  // --- Run full calibration from 4 activity recordings ---
+  static calibrate(walkingIMU, runningIMU, dribblingIMU, shootingIMU) {
+    const walkPatterns = MotionCalibrator.extractPatterns(walkingIMU, 'walking');
+    const runPatterns = MotionCalibrator.extractPatterns(runningIMU, 'running');
+    const dribblePatterns = MotionCalibrator.extractPatterns(dribblingIMU, 'dribbling');
+    const shootPatterns = MotionCalibrator.extractPatterns(shootingIMU, 'shooting');
+
+    const cal = {
+      timestamp: Date.now(),
+      profiles: {
+        walking: MotionCalibrator.computeProfile(walkPatterns),
+        running: MotionCalibrator.computeProfile(runPatterns),
+        dribbling: MotionCalibrator.computeProfile(dribblePatterns),
+        shooting: MotionCalibrator.computeProfile(shootPatterns),
+      },
+      patternCounts: {
+        walking: walkPatterns.length,
+        running: runPatterns.length,
+        dribbling: dribblePatterns.length,
+        shooting: shootPatterns.length,
+      },
+    };
+
+    MotionCalibrator.save(cal);
+    return cal;
+  }
+
+  // --- Classify a candidate using calibration profiles ---
+  static classify(features, calibration) {
+    if (!calibration || !calibration.profiles) {
+      return { isShot: true, confidence: 0, reason: 'no calibration' };
+    }
+
+    const shootProf = calibration.profiles.shooting;
+    if (!shootProf) {
+      return { isShot: true, confidence: 0, reason: 'no shooting profile' };
+    }
+
+    // Stage 1: Hard reject — dip too shallow for a real shot
+    if (shootProf.dipRatio && shootProf.dipRatio.std > 0) {
+      const maxShotDipRatio = shootProf.dipRatio.mean + 2 * shootProf.dipRatio.std;
+      const noiseProfiles = ['walking', 'running', 'dribbling'];
+      for (const label of noiseProfiles) {
+        const prof = calibration.profiles[label];
+        if (!prof || !prof.dipRatio) continue;
+        const inNoiseRange = features.dipRatio >= prof.dipRatio.mean - prof.dipRatio.std &&
+                             features.dipRatio <= prof.dipRatio.mean + prof.dipRatio.std;
+        if (features.dipRatio > maxShotDipRatio && inNoiseRange) {
+          return { isShot: false, confidence: 0.9, reason: `dipRatio ${features.dipRatio.toFixed(2)} matches ${label}, exceeds shot range` };
+        }
+      }
+    }
+
+    // Stage 2: Weighted distance scoring
+    const weights = {
+      peakMag: 1.0,
+      dipMag: 3.0,
+      dipRatio: 3.0,
+      recoveryMag: 1.0,
+      range: 2.0,
+      peakToDipSamples: 0.5,
+      dipToRecSamples: 0.5,
+      totalDuration: 0.5,
+      gyroMagAtPeak: 1.0,
+      gyroMagAtDip: 1.0,
+      maxGyroInWindow: 1.5,
+      gyroDipToRec: 2.5,
+    };
+
+    const distTo = (profile) => {
+      if (!profile) return Infinity;
+      let sumWeightedZ = 0;
+      let totalWeight = 0;
+      for (const key of Object.keys(weights)) {
+        const stat = profile[key];
+        if (!stat || stat.std === 0) continue;
+        const z = Math.abs(features[key] - stat.mean) / stat.std;
+        sumWeightedZ += z * weights[key];
+        totalWeight += weights[key];
+      }
+      return totalWeight > 0 ? sumWeightedZ / totalWeight : Infinity;
+    };
+
+    const shootDist = distTo(shootProf);
+    const walkDist = distTo(calibration.profiles.walking);
+    const runDist = distTo(calibration.profiles.running);
+    const dribbleDist = distTo(calibration.profiles.dribbling);
+    const minNoiseDist = Math.min(walkDist, runDist, dribbleDist);
+
+    const margin = 0.5;
+    if (shootDist > minNoiseDist + margin) {
+      const closestNoise = walkDist <= runDist && walkDist <= dribbleDist ? 'walking'
+        : runDist <= dribbleDist ? 'running' : 'dribbling';
+      return {
+        isShot: false,
+        confidence: Math.min(1, (shootDist - minNoiseDist) / 3),
+        reason: `closer to ${closestNoise} (shot:${shootDist.toFixed(1)} vs ${closestNoise}:${minNoiseDist.toFixed(1)})`,
+      };
+    }
+
+    return {
+      isShot: true,
+      confidence: Math.min(1, (minNoiseDist - shootDist + margin) / 3),
+      reason: `shot dist=${shootDist.toFixed(1)}, nearest noise=${minNoiseDist.toFixed(1)}`,
+    };
+  }
+
+  // --- localStorage persistence ---
+  static save(cal) {
+    try {
+      localStorage.setItem(CALIB_STORAGE_KEY, JSON.stringify(cal));
+    } catch (e) { /* quota exceeded, silently fail */ }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(CALIB_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  static clear() {
+    localStorage.removeItem(CALIB_STORAGE_KEY);
+  }
+
+  static hasCalibration() {
+    return MotionCalibrator.load() !== null;
+  }
+}
+
+
+// ===== Multi-Detector Consensus System =====
+
+class ShotDetectorConsensus {
+  // Multiple detection methods that each vote on whether a candidate is a shot.
+  // Each returns { vote: true/false, confidence: 0-1, name, detail }
+
+  // Method 1: Window σ — large rolling window std deviation spike
+  // Looks for the std of a 200-sample window to exceed threshold
+  static windowSigma(aMags, peakIdx, opts = {}) {
+    const windowSize = opts.windowSize || 200;
+    const sigma = opts.sigma || 4.0;
+
+    const halfW = Math.floor(windowSize / 2);
+    const start = Math.max(0, peakIdx - halfW);
+    const end = Math.min(aMags.length, peakIdx + halfW);
+    const slice = aMags.slice(start, end);
+    if (slice.length < 40) return { vote: false, confidence: 0, name: 'Window-σ', detail: 'too few samples' };
+
+    const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+    const variance = slice.reduce((a, v) => a + (v - mean) ** 2, 0) / slice.length;
+    const std = Math.sqrt(variance);
+
+    // The peak itself should stand out
+    const zScore = (aMags[peakIdx] - mean) / (std || 1);
+    const pass = zScore > sigma;
+
+    return {
+      vote: pass,
+      confidence: Math.min(1, zScore / (sigma + 2)),
+      name: `Window-${windowSize}σ`,
+      detail: `z=${zScore.toFixed(1)} (thresh=${sigma.toFixed(1)})`,
+    };
+  }
+
+  // Method 2: Envelope ratio — compare short window around peak to longer baseline
+  // peak_env (50 samples) vs baseline_env (200 samples) ratio
+  static envelopeRatio(aMags, peakIdx, opts = {}) {
+    const shortW = opts.shortWindow || 50;
+    const longW = opts.longWindow || 200;
+    const sigma = opts.sigma || 4.0;
+
+    // Short window centered on peak
+    const sStart = Math.max(0, peakIdx - Math.floor(shortW / 2));
+    const sEnd = Math.min(aMags.length, sStart + shortW);
+    const shortSlice = aMags.slice(sStart, sEnd);
+    if (shortSlice.length < 10) return { vote: false, confidence: 0, name: 'Envelope', detail: 'too few short' };
+
+    // Long window before peak (baseline)
+    const lEnd = Math.max(0, peakIdx - Math.floor(shortW / 2));
+    const lStart = Math.max(0, lEnd - longW);
+    const longSlice = aMags.slice(lStart, lEnd);
+    if (longSlice.length < 20) return { vote: false, confidence: 0, name: 'Envelope', detail: 'too few long' };
+
+    const shortMax = Math.max(...shortSlice);
+    const shortMin = Math.min(...shortSlice);
+    const shortRange = shortMax - shortMin;
+
+    const longMean = longSlice.reduce((a, b) => a + b, 0) / longSlice.length;
+    const longVar = longSlice.reduce((a, v) => a + (v - longMean) ** 2, 0) / longSlice.length;
+    const longStd = Math.sqrt(longVar);
+
+    const ratio = longStd > 0 ? shortRange / longStd : shortRange;
+    const pass = ratio > sigma;
+
+    return {
+      vote: pass,
+      confidence: Math.min(1, ratio / (sigma + 3)),
+      name: `Envelope-${shortW}v${longW}`,
+      detail: `ratio=${ratio.toFixed(1)} (thresh=${sigma.toFixed(1)})`,
+    };
+  }
+
+  // Method 3: Dip depth — how close to freefall (0g) does the dip get
+  // Shots should approach 0-3 m/s², walking/running stays above 5
+  static dipDepth(aMags, peakIdx, dipIdx, opts = {}) {
+    const maxDipForShot = opts.maxDip || 5.0;
+    const dipVal = aMags[dipIdx];
+    const pass = dipVal < maxDipForShot;
+
+    return {
+      vote: pass,
+      confidence: pass ? Math.min(1, (maxDipForShot - dipVal) / maxDipForShot) : 0,
+      name: 'DipDepth',
+      detail: `dip=${dipVal.toFixed(1)} (thresh<${maxDipForShot})`,
+    };
+  }
+
+  // Method 4: Peak prominence — peak must stand out from local neighborhood
+  static peakProminence(aMags, peakIdx, opts = {}) {
+    const neighborhoodSize = opts.neighborhood || 100;
+    const minProminence = opts.minProminence || 5.0;
+
+    const start = Math.max(0, peakIdx - neighborhoodSize);
+    const end = Math.min(aMags.length, peakIdx + neighborhoodSize);
+
+    // Find lowest valley on each side
+    let leftMin = aMags[peakIdx];
+    for (let j = peakIdx - 1; j >= start; j--) {
+      if (aMags[j] < leftMin) leftMin = aMags[j];
+    }
+
+    let rightMin = aMags[peakIdx];
+    for (let j = peakIdx + 1; j < end; j++) {
+      if (aMags[j] < rightMin) rightMin = aMags[j];
+    }
+
+    const prominence = aMags[peakIdx] - Math.max(leftMin, rightMin);
+    const pass = prominence > minProminence;
+
+    return {
+      vote: pass,
+      confidence: Math.min(1, prominence / (minProminence * 2)),
+      name: 'Prominence',
+      detail: `prom=${prominence.toFixed(1)} (thresh>${minProminence})`,
+    };
+  }
+
+  // --- Run all detectors and produce consensus ---
+  static evaluate(aMags, peakIdx, dipIdx, recIdx, opts = {}) {
+    const methods = [
+      ShotDetectorConsensus.windowSigma(aMags, peakIdx, opts.windowSigma),
+      ShotDetectorConsensus.envelopeRatio(aMags, peakIdx, opts.envelopeRatio),
+      ShotDetectorConsensus.dipDepth(aMags, peakIdx, dipIdx, opts.dipDepth),
+      ShotDetectorConsensus.peakProminence(aMags, peakIdx, opts.peakProminence),
+    ];
+
+    const votes = methods.filter(m => m.vote).length;
+    const total = methods.length;
+    const minVotes = opts.minVotes || 3; // default: need 3 of 4 to agree
+
+    return {
+      isShot: votes >= minVotes,
+      votes,
+      total,
+      confidence: votes / total,
+      methods,
+    };
   }
 }
 

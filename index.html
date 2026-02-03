@@ -91,6 +91,41 @@
         </div>
       </div>
       <button id="btn-export" class="btn btn-secondary" disabled>Export</button>
+      <button id="btn-motion-cal" class="btn btn-secondary" disabled>Motion Cal</button>
+    </div>
+
+    <!-- Motion Calibration Overlay -->
+    <div id="cal-overlay" class="cal-overlay hidden">
+      <div class="cal-overlay-inner">
+        <div class="cal-step-indicator">
+          <span class="cal-step-dot" data-step="0"></span>
+          <span class="cal-step-dot" data-step="1"></span>
+          <span class="cal-step-dot" data-step="2"></span>
+          <span class="cal-step-dot" data-step="3"></span>
+        </div>
+        <div class="cal-step-title" id="cal-step-title">Walking</div>
+        <div class="cal-step-instruction" id="cal-step-instruction">Walk normally with phone in pocket</div>
+        <div class="cal-countdown" id="cal-countdown">10</div>
+        <div class="cal-progress-wrap">
+          <div class="cal-progress-bar" id="cal-progress-bar"></div>
+        </div>
+        <div class="cal-actions">
+          <button id="cal-skip" class="btn btn-sm btn-secondary">Skip</button>
+          <button id="cal-cancel" class="btn btn-sm btn-danger">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Calibration Result Modal -->
+    <div id="cal-result-modal" class="modal hidden">
+      <div class="modal-content cal-result-content">
+        <h3>Calibration Complete</h3>
+        <div id="cal-result-body" class="cal-result-body"></div>
+        <div class="modal-actions">
+          <button id="cal-result-clear" class="btn btn-sm btn-secondary">Clear Cal</button>
+          <button id="cal-result-ok" class="btn btn-sm btn-primary">OK</button>
+        </div>
+      </div>
     </div>
 
     <!-- Zone Confirmation Popup -->

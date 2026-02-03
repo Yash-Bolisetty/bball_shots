@@ -22,6 +22,20 @@ const Tracker = (() => {
   let calibrationTimeout = null;
   let gpsCalibration = { rim: null, top3: null, left: null, right: null };
 
+  // Motion calibration state
+  const CALIB_STEPS = [
+    { key: 'walking',   label: 'Walking',            instruction: 'Walk normally with phone in pocket', duration: 10 },
+    { key: 'running',   label: 'Running',             instruction: 'Jog or run with phone in pocket',   duration: 10 },
+    { key: 'dribbling', label: 'Dribbling + Running', instruction: 'Dribble with right hand while moving, phone in left pocket', duration: 10 },
+    { key: 'shooting',  label: 'Shooting',            instruction: 'Take 3-5 jump shots at normal pace', duration: 20 },
+  ];
+  let motionCalActive = false;
+  let motionCalStep = -1;
+  let motionCalBuffers = {};  // key -> imu sample array
+  let motionCalTimer = null;
+  let motionCalCountdown = 0;
+  let motionCalStartTime = 0;
+
   // Waveform state
   let waveformCanvas, waveformCtx;
   let waveformData = []; // last ~10s of aMag values for drawing
@@ -82,6 +96,11 @@ const Tracker = (() => {
   function setupControls() {
     document.getElementById('btn-start').addEventListener('click', toggleRecording);
     document.getElementById('btn-export').addEventListener('click', exportSession);
+    document.getElementById('btn-motion-cal').addEventListener('click', startMotionCal);
+    document.getElementById('cal-skip').addEventListener('click', skipMotionCalStep);
+    document.getElementById('cal-cancel').addEventListener('click', cancelMotionCal);
+    document.getElementById('cal-result-ok').addEventListener('click', closeCalResult);
+    document.getElementById('cal-result-clear').addEventListener('click', clearCalResult);
   }
 
   function toggleRecording() {
@@ -128,6 +147,13 @@ const Tracker = (() => {
     document.getElementById('btn-calibrate').disabled = false;
     document.getElementById('btn-anchor').disabled = false;
     document.getElementById('btn-export').disabled = false;
+    document.getElementById('btn-motion-cal').disabled = false;
+
+    // Load calibration if available
+    const cal = MotionCalibrator.load();
+    if (cal) {
+      shotDetector.calibration = cal;
+    }
 
     // Clear shot log
     document.getElementById('shot-log-list').innerHTML = '';
@@ -154,11 +180,13 @@ const Tracker = (() => {
     document.getElementById('recording-dot').classList.add('hidden');
     document.getElementById('btn-calibrate').disabled = true;
     document.getElementById('btn-anchor').disabled = true;
+    document.getElementById('btn-motion-cal').disabled = true;
 
     clearInterval(timerInterval);
     window.removeEventListener('devicemotion', onDeviceMotion);
     stopGPS();
     stopCalibration();
+    cancelMotionCal();
   }
 
   function updateTimer() {
@@ -199,6 +227,13 @@ const Tracker = (() => {
 
     buffer.push(sample);
     session.addIMU(sample);
+
+    // Route to motion calibration buffer if active
+    if (motionCalActive && motionCalStep >= 0 && motionCalStep < CALIB_STEPS.length) {
+      const stepKey = CALIB_STEPS[motionCalStep].key;
+      if (!motionCalBuffers[stepKey]) motionCalBuffers[stepKey] = [];
+      motionCalBuffers[stepKey].push(sample);
+    }
 
     // Track movement transitions
     const prevMoving = buffer.length > 1 ? buffer.get(buffer.length - 2)?.moving : moving;
@@ -555,6 +590,143 @@ const Tracker = (() => {
     document.getElementById('stat-zone').textContent = zone;
 
     drawCourt();
+  }
+
+  // ===== Motion Calibration Flow =====
+  function startMotionCal() {
+    if (!isRecording || motionCalActive) return;
+    motionCalActive = true;
+    motionCalStep = -1;
+    motionCalBuffers = {};
+    advanceMotionCalStep();
+  }
+
+  function advanceMotionCalStep() {
+    motionCalStep++;
+    if (motionCalStep >= CALIB_STEPS.length) {
+      finishMotionCal();
+      return;
+    }
+
+    const step = CALIB_STEPS[motionCalStep];
+    motionCalCountdown = step.duration;
+    motionCalStartTime = Date.now();
+    motionCalBuffers[step.key] = [];
+
+    // Update UI
+    const overlay = document.getElementById('cal-overlay');
+    overlay.classList.remove('hidden');
+
+    document.getElementById('cal-step-title').textContent = step.label;
+    document.getElementById('cal-step-instruction').textContent = step.instruction;
+    document.getElementById('cal-countdown').textContent = motionCalCountdown;
+    document.getElementById('cal-progress-bar').style.width = '0%';
+
+    // Update step dots
+    const dots = overlay.querySelectorAll('.cal-step-dot');
+    dots.forEach((dot, idx) => {
+      dot.classList.remove('active', 'done');
+      if (idx < motionCalStep) dot.classList.add('done');
+      else if (idx === motionCalStep) dot.classList.add('active');
+    });
+
+    // Haptic feedback for step start
+    if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
+
+    // Start countdown timer
+    clearInterval(motionCalTimer);
+    motionCalTimer = setInterval(updateMotionCalCountdown, 1000);
+  }
+
+  function updateMotionCalCountdown() {
+    const step = CALIB_STEPS[motionCalStep];
+    if (!step) return;
+
+    const elapsed = (Date.now() - motionCalStartTime) / 1000;
+    motionCalCountdown = Math.max(0, Math.ceil(step.duration - elapsed));
+
+    document.getElementById('cal-countdown').textContent = motionCalCountdown;
+    const progress = Math.min(100, (elapsed / step.duration) * 100);
+    document.getElementById('cal-progress-bar').style.width = progress + '%';
+
+    if (motionCalCountdown <= 0) {
+      clearInterval(motionCalTimer);
+      if (navigator.vibrate) navigator.vibrate(100);
+      // Brief pause then advance
+      setTimeout(advanceMotionCalStep, 300);
+    }
+  }
+
+  function skipMotionCalStep() {
+    clearInterval(motionCalTimer);
+    // Keep whatever data was collected (could be empty)
+    advanceMotionCalStep();
+  }
+
+  function cancelMotionCal() {
+    if (!motionCalActive) return;
+    clearInterval(motionCalTimer);
+    motionCalActive = false;
+    motionCalStep = -1;
+    motionCalBuffers = {};
+    document.getElementById('cal-overlay').classList.add('hidden');
+  }
+
+  function finishMotionCal() {
+    clearInterval(motionCalTimer);
+    motionCalActive = false;
+    document.getElementById('cal-overlay').classList.add('hidden');
+
+    // Run calibration
+    const cal = MotionCalibrator.calibrate(
+      motionCalBuffers.walking || [],
+      motionCalBuffers.running || [],
+      motionCalBuffers.dribbling || [],
+      motionCalBuffers.shooting || []
+    );
+
+    // Set on active detector
+    shotDetector.calibration = cal;
+
+    // Haptic: done
+    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+
+    // Show result modal
+    showCalResult(cal);
+  }
+
+  function showCalResult(cal) {
+    const body = document.getElementById('cal-result-body');
+    let html = '';
+
+    for (const step of CALIB_STEPS) {
+      const count = cal.patternCounts[step.key] || 0;
+      const countClass = count === 0 ? 'zero' : '';
+      html += `<div class="cal-result-row">
+        <span class="cal-result-label">${step.label}</span>
+        <span class="cal-result-count ${countClass}">${count} pattern${count !== 1 ? 's' : ''}</span>
+      </div>`;
+    }
+
+    const hasShots = (cal.patternCounts.shooting || 0) > 0;
+    html += `<div style="text-align:center; margin-top:12px;">
+      <span class="cal-status-badge ${hasShots ? 'active' : 'none'}">
+        ${hasShots ? 'Calibration Active' : 'No shooting patterns found'}
+      </span>
+    </div>`;
+
+    body.innerHTML = html;
+    document.getElementById('cal-result-modal').classList.remove('hidden');
+  }
+
+  function closeCalResult() {
+    document.getElementById('cal-result-modal').classList.add('hidden');
+  }
+
+  function clearCalResult() {
+    MotionCalibrator.clear();
+    shotDetector.calibration = null;
+    document.getElementById('cal-result-modal').classList.add('hidden');
   }
 
   // ===== Render Loop =====
