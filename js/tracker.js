@@ -24,10 +24,10 @@ const Tracker = (() => {
 
   // Motion calibration state
   const CALIB_STEPS = [
-    { key: 'walking',   label: 'Walking',            instruction: 'Walk normally with phone in pocket', duration: 10 },
-    { key: 'running',   label: 'Running',             instruction: 'Jog or run with phone in pocket',   duration: 10 },
-    { key: 'dribbling', label: 'Dribbling + Running', instruction: 'Dribble with right hand while moving, phone in left pocket', duration: 10 },
-    { key: 'shooting',  label: 'Shooting',            instruction: 'Take 3-5 jump shots at normal pace', duration: 20 },
+    { key: 'walking',   label: 'Walk a Lap',            instruction: 'Walk normally with phone in pocket. Tap Done when finished.' },
+    { key: 'running',   label: 'Run a Lap',             instruction: 'Jog or run with phone in pocket. Tap Done when finished.' },
+    { key: 'dribbling', label: 'Dribble + Run a Lap',   instruction: 'Dribble with right hand while moving, phone in left pocket. Tap Done when finished.' },
+    { key: 'shooting',  label: 'Shoot 3-5 Shots',       instruction: 'Take 3-5 jump shots at normal pace. Tap Done when finished.' },
   ];
   let motionCalActive = false;
   let motionCalStep = -1;
@@ -98,6 +98,7 @@ const Tracker = (() => {
     document.getElementById('btn-start').addEventListener('click', toggleRecording);
     document.getElementById('btn-export').addEventListener('click', exportSession);
     document.getElementById('btn-motion-cal').addEventListener('click', startMotionCal);
+    document.getElementById('cal-done').addEventListener('click', doneMotionCalStep);
     document.getElementById('cal-skip').addEventListener('click', skipMotionCalStep);
     document.getElementById('cal-cancel').addEventListener('click', cancelMotionCal);
     document.getElementById('cal-result-ok').addEventListener('click', closeCalResult);
@@ -682,7 +683,6 @@ const Tracker = (() => {
     }
 
     const step = CALIB_STEPS[motionCalStep];
-    motionCalCountdown = step.duration;
     motionCalStartTime = Date.now();
     motionCalBuffers[step.key] = [];
 
@@ -692,8 +692,8 @@ const Tracker = (() => {
 
     document.getElementById('cal-step-title').textContent = step.label;
     document.getElementById('cal-step-instruction').textContent = step.instruction;
-    document.getElementById('cal-countdown').textContent = motionCalCountdown;
-    document.getElementById('cal-progress-bar').style.width = '0%';
+    document.getElementById('cal-countdown').textContent = '0:00';
+    document.getElementById('cal-sample-count').textContent = '0 samples';
 
     // Update step dots
     const dots = overlay.querySelectorAll('.cal-step-dot');
@@ -706,33 +706,37 @@ const Tracker = (() => {
     // Strong haptic between phases: long-short-long pattern
     if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
 
-    // Start countdown timer
+    // Start elapsed timer (counts up)
     clearInterval(motionCalTimer);
-    motionCalTimer = setInterval(updateMotionCalCountdown, 1000);
+    motionCalTimer = setInterval(updateMotionCalElapsed, 500);
   }
 
-  function updateMotionCalCountdown() {
-    const step = CALIB_STEPS[motionCalStep];
-    if (!step) return;
-
+  function updateMotionCalElapsed() {
     const elapsed = (Date.now() - motionCalStartTime) / 1000;
-    motionCalCountdown = Math.max(0, Math.ceil(step.duration - elapsed));
+    const mins = Math.floor(elapsed / 60);
+    const secs = Math.floor(elapsed % 60);
+    document.getElementById('cal-countdown').textContent = mins + ':' + String(secs).padStart(2, '0');
 
-    document.getElementById('cal-countdown').textContent = motionCalCountdown;
-    const progress = Math.min(100, (elapsed / step.duration) * 100);
-    document.getElementById('cal-progress-bar').style.width = progress + '%';
-
-    if (motionCalCountdown <= 0) {
-      clearInterval(motionCalTimer);
-      // Short buzz to signal step end, then pause before next step's big vibration
-      if (navigator.vibrate) navigator.vibrate([150, 100, 150]);
-      setTimeout(advanceMotionCalStep, 800);
+    // Show sample count for current step
+    const step = CALIB_STEPS[motionCalStep];
+    if (step) {
+      const count = (motionCalBuffers[step.key] || []).length;
+      document.getElementById('cal-sample-count').textContent = count + ' samples';
     }
+  }
+
+  function doneMotionCalStep() {
+    clearInterval(motionCalTimer);
+    // Buzz to confirm
+    if (navigator.vibrate) navigator.vibrate([150, 100, 150]);
+    setTimeout(advanceMotionCalStep, 400);
   }
 
   function skipMotionCalStep() {
     clearInterval(motionCalTimer);
-    // Keep whatever data was collected (could be empty)
+    // Clear data for skipped step
+    const step = CALIB_STEPS[motionCalStep];
+    if (step) motionCalBuffers[step.key] = [];
     advanceMotionCalStep();
   }
 

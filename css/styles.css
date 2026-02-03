@@ -831,32 +831,34 @@ body {
 }
 
 .cal-countdown {
-  font-size: 64px;
+  font-size: 48px;
   font-weight: 700;
   font-family: var(--mono);
   color: var(--accent);
-  margin-bottom: 16px;
+  margin-bottom: 4px;
   line-height: 1;
 }
 
-.cal-progress-wrap {
-  width: 100%;
-  height: 6px;
-  background: var(--bg-input);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 24px;
-}
-
-.cal-progress-bar {
-  height: 100%;
-  width: 0%;
-  background: var(--accent);
-  border-radius: 3px;
-  transition: width 0.3s linear;
+.cal-sample-count {
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  margin-bottom: 20px;
 }
 
 .cal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.cal-actions .btn-primary {
+  padding: 12px 40px;
+  font-size: 16px;
+}
+
+.cal-actions-secondary {
   display: flex;
   gap: 12px;
   justify-content: center;
