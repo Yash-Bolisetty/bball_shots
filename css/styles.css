@@ -772,6 +772,38 @@ body {
   pointer-events: none;
 }
 
+/* ===== Voice Labeling ===== */
+.btn-voice-active {
+  background: var(--red) !important;
+  border-color: var(--red) !important;
+  color: #fff !important;
+  animation: pulse 1s infinite;
+}
+
+.voice-status-bar {
+  min-height: 20px;
+  margin-bottom: 6px;
+}
+
+.voice-status {
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  transition: color 0.3s;
+}
+
+.voice-status.voice-flash {
+  color: var(--green);
+}
+
+.voice-label-item {
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.voice-label-num {
+  background: var(--green) !important;
+}
+
 /* ===== Calibration Overlay ===== */
 .cal-overlay {
   position: fixed;

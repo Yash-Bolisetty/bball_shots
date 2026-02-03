@@ -37,6 +37,11 @@ const Tracker = (() => {
   let motionCalStartTime = 0;
   let motionCalOwnsSensors = false; // true when cal started its own IMU listener (pre-recording)
 
+  // Voice labeling state
+  let speechRecognition = null;
+  let voiceLabeling = false;
+  let voiceShotCount = 0;
+
   // Waveform state
   let waveformCanvas, waveformCtx;
   let waveformData = []; // last ~10s of aMag values for drawing
@@ -98,6 +103,7 @@ const Tracker = (() => {
     document.getElementById('btn-start').addEventListener('click', toggleRecording);
     document.getElementById('btn-export').addEventListener('click', exportSession);
     document.getElementById('btn-motion-cal').addEventListener('click', startMotionCal);
+    document.getElementById('btn-voice').addEventListener('click', toggleVoiceLabeling);
     document.getElementById('cal-done').addEventListener('click', doneMotionCalStep);
     document.getElementById('cal-skip').addEventListener('click', skipMotionCalStep);
     document.getElementById('cal-cancel').addEventListener('click', cancelMotionCal);
@@ -187,6 +193,7 @@ const Tracker = (() => {
     stopGPS();
     stopCalibration();
     cancelMotionCal();
+    stopVoiceLabeling();
   }
 
   function updateTimer() {
@@ -813,6 +820,146 @@ const Tracker = (() => {
     MotionCalibrator.clear();
     shotDetector.calibration = null;
     document.getElementById('cal-result-modal').classList.add('hidden');
+  }
+
+  // ===== Voice Labeling =====
+  function initSpeechRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return null;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.maxAlternatives = 3;
+
+    recognition.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        // Check all alternatives for "shot" keyword
+        for (let j = 0; j < result.length; j++) {
+          const transcript = result[j].transcript.toLowerCase().trim();
+          if (/\bshot\b/.test(transcript)) {
+            onVoiceShotDetected(transcript, result.isFinal);
+            return;
+          }
+        }
+      }
+    };
+
+    recognition.onerror = (event) => {
+      // Restart on recoverable errors
+      if (event.error === 'no-speech' || event.error === 'aborted') {
+        if (voiceLabeling) {
+          try { recognition.start(); } catch (e) { /* already running */ }
+        }
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart if still active (browser stops after silence)
+      if (voiceLabeling) {
+        try { recognition.start(); } catch (e) { /* already running */ }
+      }
+    };
+
+    return recognition;
+  }
+
+  let lastVoiceShotTime = 0;
+
+  function onVoiceShotDetected(transcript, isFinal) {
+    // Debounce: ignore if within 2s of last voice shot (interim results repeat)
+    const now = Date.now();
+    if (now - lastVoiceShotTime < 2000) return;
+    lastVoiceShotTime = now;
+
+    voiceShotCount++;
+
+    // Create voice label event
+    const voiceEvent = {
+      type: 'voice_shot',
+      t: now,
+      tRel: isRecording ? now - startTime : 0,
+      transcript,
+      isFinal,
+      voiceShotNum: voiceShotCount,
+    };
+
+    if (session) {
+      session.addEvent(voiceEvent);
+    }
+
+    // Haptic feedback — distinct double-tap pattern for voice
+    if (navigator.vibrate) navigator.vibrate([50, 50, 50, 50, 50]);
+
+    // Update voice indicator
+    flashVoiceIndicator(transcript);
+
+    // Add to shot log
+    addVoiceLabelToLog(voiceShotCount, transcript);
+  }
+
+  function flashVoiceIndicator(transcript) {
+    const el = document.getElementById('voice-status');
+    if (!el) return;
+    el.textContent = 'Heard: "' + transcript + '"';
+    el.classList.add('voice-flash');
+    setTimeout(() => el.classList.remove('voice-flash'), 1500);
+  }
+
+  function addVoiceLabelToLog(num, transcript) {
+    const list = document.getElementById('shot-log-list');
+    const div = document.createElement('div');
+    div.className = 'shot-log-item voice-label-item';
+    const elapsed = isRecording ? formatTime(Date.now() - startTime) : '--:--';
+    div.innerHTML = `
+      <div class="shot-log-num voice-label-num">${num}</div>
+      <div class="shot-log-info-col">
+        <div class="shot-log-zone">VOICE LABEL</div>
+        <div class="shot-log-mag">"${transcript}"</div>
+      </div>
+      <div class="shot-log-time">${elapsed}</div>
+    `;
+    list.insertBefore(div, list.firstChild);
+  }
+
+  function startVoiceLabeling() {
+    if (voiceLabeling) return;
+    speechRecognition = initSpeechRecognition();
+    if (!speechRecognition) {
+      alert('Speech recognition not supported in this browser.');
+      return;
+    }
+    voiceLabeling = true;
+    voiceShotCount = 0;
+    lastVoiceShotTime = 0;
+    try {
+      speechRecognition.start();
+    } catch (e) { /* already running */ }
+
+    const btn = document.getElementById('btn-voice');
+    btn.classList.add('btn-voice-active');
+    btn.textContent = 'Mic ON';
+    document.getElementById('voice-status').textContent = 'Listening...';
+  }
+
+  function stopVoiceLabeling() {
+    if (!voiceLabeling) return;
+    voiceLabeling = false;
+    if (speechRecognition) {
+      try { speechRecognition.stop(); } catch (e) {}
+      speechRecognition = null;
+    }
+    const btn = document.getElementById('btn-voice');
+    btn.classList.remove('btn-voice-active');
+    btn.textContent = 'Mic';
+    document.getElementById('voice-status').textContent = '';
+  }
+
+  function toggleVoiceLabeling() {
+    if (voiceLabeling) stopVoiceLabeling();
+    else startVoiceLabeling();
   }
 
   // ===== Render Loop =====
