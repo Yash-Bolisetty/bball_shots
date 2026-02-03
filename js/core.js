@@ -167,20 +167,27 @@ const DIP_SIGMA = 1.5;
 const RECOVERY_SIGMA = 1.0;
 const PEAK_TO_DIP_SIGMA = 5.0;
 const MIN_PEAK_ABS = 14;
-const MAX_DIP_ABS = 6;       // was 8 — tighter: real shots dip well below 6
-const MIN_RISE_FROM_DIP = 5;  // was 4 — tighter: real shots recover strongly
-const MIN_PEAK_TO_DIP_ABS = 8; // was 6 — tighter: real shots have large swings
+const MAX_DIP_ABS = 4;        // was 6 — real shots dip to 0-2, walking often stays above 4
+const MIN_RISE_FROM_DIP = 8;  // was 5 — real shots recover by 23+, walking much less
+const MIN_PEAK_TO_DIP_ABS = 12; // was 8 — real shots have 12.6+ range
 const BASELINE_WINDOW = 80;
 const BASELINE_OFFSET = 20;
 const DIP_SEARCH_WINDOW = 35;
 const RECOVERY_SEARCH_WINDOW = 30;
 const SCAN_START_OFFSET = 90;  // from end
 const SCAN_END_OFFSET = 50;    // from end
-const MIN_SHOT_INTERVAL_MS = 1200;
+const MIN_SHOT_INTERVAL_MS = 2000;  // was 1200 — ~2s between shots for real play
 const MIN_SHOT_SAMPLES = 60;
-const MAX_EFFECTIVE_STD = 1.5; // Cap std for peak/range/recovery thresholds only
-                                // Prevents nearby shots from inflating baseline std
+const MAX_EFFECTIVE_STD = 3.0; // was 1.5 — higher cap lets walking's large std raise
+                                // peak threshold, reducing false positives during movement
                                 // Real std still used for dip threshold (stricter when noisy)
+
+// Movement-aware stricter thresholds: when the sample is flagged as "moving"
+// by the movement detector, walking/running creates shot-like IMU patterns.
+// Require stronger signals to distinguish real shots from movement artifacts.
+const MOVING_MIN_PEAK_ABS = 25;     // higher peak during movement (walking peaks ~14-25)
+const MOVING_MIN_RANGE = 20;        // larger swing during movement
+const MOVING_MIN_RISE = 15;         // stronger recovery during movement
 
 class ShotDetector {
   constructor() {
@@ -276,6 +283,14 @@ class ShotDetector {
       const riseFromDip = aMags[recIdx] - aMags[dipIdx];
       if (aMags[recIdx] < recThreshold || riseFromDip < MIN_RISE_FROM_DIP) continue;
 
+      // Movement-aware stricter thresholds: if baseline std is high,
+      // the player was actively moving — require stronger signals
+      if (base.std > 2.0) {
+        if (aMags[i] < MOVING_MIN_PEAK_ABS) continue;
+        if (peakToDipRange < MOVING_MIN_RANGE) continue;
+        if (riseFromDip < MOVING_MIN_RISE) continue;
+      }
+
       // Three-phase passed — apply post-filters
 
       // Multi-detector consensus
@@ -310,6 +325,12 @@ class ShotDetector {
 
       lastIdx = i;
       lastTime = sampleTime;
+    }
+
+    // Retrospective burst filter: prune clusters of rapid-fire detections
+    const toRemove = ShotDetector.retrospectiveFilter(shots);
+    if (toRemove.size > 0) {
+      return shots.filter((_, i) => !toRemove.has(i));
     }
     return shots;
   }
@@ -361,6 +382,14 @@ class ShotDetector {
     const riseFromDip = aMags[recIdx] - aMags[dipIdx];
     if (aMags[recIdx] < recThreshold || riseFromDip < MIN_RISE_FROM_DIP) return null;
 
+    // Movement-aware stricter thresholds: if baseline std is high,
+    // the player was actively moving — require stronger signals
+    if (base.std > 2.0) {
+      if (aMags[i] < MOVING_MIN_PEAK_ABS) return null;
+      if (peakToDipRange < MOVING_MIN_RANGE) return null;
+      if (riseFromDip < MOVING_MIN_RISE) return null;
+    }
+
     // Three-phase passed — apply post-filters
 
     // Multi-detector consensus
@@ -400,6 +429,64 @@ class ShotDetector {
   reset() {
     this.lastShotTime = 0;
     this.lastShotIdx = -Infinity;
+  }
+
+  // Retrospective burst filter: finds clusters of rapid-fire detections
+  // (likely walking/running false positives) and returns indices to remove.
+  // Called periodically on the session's shot events.
+  //
+  // Returns Set of indices into shotEvents array that should be retracted.
+  static retrospectiveFilter(shotEvents) {
+    if (shotEvents.length < 4) return new Set();
+
+    // Burst = 3+ consecutive shots all within BURST_GAP of each other
+    const BURST_GAP_MS = 12000;  // 12s — walking FPs are often ~10s apart
+    const MIN_BURST_SIZE = 3;
+
+    const bursts = [];
+    let burst = [0];
+
+    for (let i = 1; i < shotEvents.length; i++) {
+      const gap = shotEvents[i].t - shotEvents[i - 1].t;
+      if (gap > 0 && gap <= BURST_GAP_MS) {
+        burst.push(i);
+      } else {
+        if (burst.length >= MIN_BURST_SIZE) bursts.push([...burst]);
+        burst = [i];
+      }
+    }
+    if (burst.length >= MIN_BURST_SIZE) bursts.push(burst);
+
+    const toRemove = new Set();
+
+    for (const burstIndices of bursts) {
+      // Score each shot in the burst — higher = more likely a real shot
+      // Supports both event fields (magnitude) and detection fields (mag)
+      const scored = burstIndices.map(idx => {
+        const e = shotEvents[idx];
+        const range = e.peakToDipRange || e.range || 0;
+        const mag = e.magnitude || e.mag || 0;
+        const dip = e.dipMagnitude || e.dipMag || 10;
+        const recovery = e.recoveryMagnitude || e.recoveryMag || 0;
+        // Favor large range, deep dip, high recovery
+        const score = range * 2 + (recovery - dip) + mag * 0.5;
+        return { idx, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+
+      // Keep at most 1 shot per 8 seconds of burst duration
+      const burstStart = shotEvents[burstIndices[0]].t;
+      const burstEnd = shotEvents[burstIndices[burstIndices.length - 1]].t;
+      const burstDurationSec = (burstEnd - burstStart) / 1000;
+      const maxKeep = Math.max(1, Math.round(burstDurationSec / 8));
+
+      for (let i = maxKeep; i < scored.length; i++) {
+        toRemove.add(scored[i].idx);
+      }
+    }
+
+    return toRemove;
   }
 }
 

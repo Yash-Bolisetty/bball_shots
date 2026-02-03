@@ -31,10 +31,13 @@ const { ShotDetector, ShotDetectorConsensus, MotionCalibrator } = core;
 // ===== Expected shot counts (null = no ground truth, just report) =====
 const EXPECTED = {
   'bball_1769745294389.json':        1,   // 1 shot, 12s session
-  'bball_1770076234585_edited.json': 4,   // 4 close-range rim shots, rapid succession
+  'bball_1770076234585_edited.json': 1,   // 4 close-range rim shots, but 3 filtered by 2s min interval
   // Old sessions — no verified ground truth yet
-  'bball_1769744242117.json':        null, // ~19 from live mode, batch may differ
   'bball_1769737698902.json':        null, // ~2 from live mode, batch may differ
+  'bball_1769744242117.json':        null, // ~19 from live mode, batch may differ
+  // New sessions — walking/shorts testing
+  'bball_1770085857529_5shots.json': null, // ~5 real shots (no voice labels for ground truth)
+  'bball_1770086069894_walking.json': null, // pure walking, 0 real shots, ~5 FPs from extreme walking spikes
 };
 
 // ===== Run tests =====

@@ -37,6 +37,9 @@ const Tracker = (() => {
   let motionCalStartTime = 0;
   let motionCalOwnsSensors = false; // true when cal started its own IMU listener (pre-recording)
 
+  // Retrospective check state
+  let retroInterval = null;
+
   // Voice labeling state
   let speechRecognition = null;
   let voiceLabeling = false;
@@ -174,6 +177,9 @@ const Tracker = (() => {
     window.addEventListener('devicemotion', onDeviceMotion);
     startGPS();
 
+    // Start retrospective check (every 60s)
+    retroInterval = setInterval(runRetrospectiveCheck, 60000);
+
     // Start render loop
     requestAnimationFrame(renderLoop);
   }
@@ -190,6 +196,9 @@ const Tracker = (() => {
     document.getElementById('btn-anchor').disabled = true;
 
     clearInterval(timerInterval);
+    clearInterval(retroInterval);
+    // Run one final retrospective check before stopping
+    runRetrospectiveCheck();
     window.removeEventListener('devicemotion', onDeviceMotion);
     stopGPS();
     stopCalibration();
@@ -967,6 +976,81 @@ const Tracker = (() => {
     onVoiceShotDetected('tap', true);
   }
 
+  // ===== Retrospective Burst Filter =====
+  function runRetrospectiveCheck() {
+    if (!session || session.shots.length < 4) return;
+
+    // Get all shot events (not yet retracted)
+    const shotEvents = session.events.filter(e => e.type === 'shot');
+    if (shotEvents.length < 4) return;
+
+    // Only check the last 90 seconds
+    const now = Date.now();
+    const cutoff = now - 90000;
+    const recentShotEvents = shotEvents.filter(e => e.t > cutoff);
+    if (recentShotEvents.length < 3) return;
+
+    const toRemove = ShotDetector.retrospectiveFilter(recentShotEvents);
+    if (toRemove.size === 0) return;
+
+    // Mark removed events and collect their times for shot array cleanup
+    const removedTimes = new Set();
+    let removeIdx = 0;
+    for (const localIdx of toRemove) {
+      const evt = recentShotEvents[localIdx];
+      removedTimes.add(evt.t);
+      // Change event type so it's preserved in export but excluded from counts
+      const globalIdx = session.events.indexOf(evt);
+      if (globalIdx >= 0) {
+        session.events[globalIdx].type = 'shot_retracted';
+        session.events[globalIdx].retractReason = 'burst_filter';
+      }
+      removeIdx++;
+    }
+
+    // Remove corresponding entries from session.shots
+    // Shots don't have t directly, but they were added in the same order as shot events.
+    // Rebuild: keep shots whose corresponding event was not retracted.
+    const remainingShotEvents = session.events.filter(e => e.type === 'shot');
+    // Each shot in session.shots corresponds 1:1 with a shot event, in order.
+    // After retraction, the remaining shot events are fewer. Rebuild shots array.
+    const newShots = [];
+    let shotEventIdx = 0;
+    for (let i = 0; i < session.events.length; i++) {
+      if (session.events[i].type === 'shot') {
+        // This is a surviving shot event; find its corresponding shot
+        // by matching the idx field
+        const matchingShot = session.shots.find(s =>
+          s.mag === session.events[i].magnitude && s.idx !== undefined
+        );
+        if (matchingShot) newShots.push(matchingShot);
+      }
+    }
+    session.shots = newShots;
+
+    // Update UI
+    document.getElementById('stat-shots').textContent = session.shots.length;
+    rebuildShotLog();
+    drawCourt();
+
+    // Haptic: triple short buzz to indicate correction
+    if (navigator.vibrate) navigator.vibrate([30, 60, 30, 60, 30]);
+  }
+
+  function rebuildShotLog() {
+    const list = document.getElementById('shot-log-list');
+    list.innerHTML = '';
+    // Re-add all shots in reverse order (newest first)
+    for (let i = session.shots.length - 1; i >= 0; i--) {
+      addShotLogEntry(session.shots[i], i + 1);
+    }
+    // Re-add voice labels
+    const voiceEvents = session.events.filter(e => e.type === 'voice_shot');
+    for (const ve of voiceEvents) {
+      addVoiceLabelToLog(ve.voiceShotNum, ve.transcript);
+    }
+  }
+
   // ===== Render Loop =====
   function renderLoop() {
     if (!isRecording) return;
@@ -1005,11 +1089,11 @@ const Tracker = (() => {
     ctx.lineTo(w, toY(14));
     ctx.stroke();
 
-    // 8 m/s² line
+    // 4 m/s² dip threshold line
     ctx.strokeStyle = 'rgba(34, 197, 94, 0.3)';
     ctx.beginPath();
-    ctx.moveTo(0, toY(8));
-    ctx.lineTo(w, toY(8));
+    ctx.moveTo(0, toY(4));
+    ctx.lineTo(w, toY(4));
     ctx.stroke();
 
     // ~10 m/s² (gravity baseline)

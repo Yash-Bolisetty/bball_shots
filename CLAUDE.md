@@ -15,17 +15,20 @@ The project originated as a CodePen prototype (vanilla JS, single-file). It is b
 The core detection uses a **three-phase IMU signature**: Peak Spike → Low Dip → Recovery Peak.
 
 1. **Peak Spike**: Local maximum in acceleration magnitude, must exceed `baseline_mean + PEAK_SIGMA * baseline_std` (PEAK_SIGMA=2.5) and absolute minimum of 14 m/s².
-2. **Low Dip**: Minimum acceleration within 35 samples after peak, must fall below `baseline_mean - DIP_SIGMA * baseline_std` (DIP_SIGMA=1.5) and absolute max of 8 m/s².
-3. **Recovery Peak**: Local maximum within 30 samples after dip, must exceed `baseline_mean + RECOVERY_SIGMA * baseline_std` (RECOVERY_SIGMA=1.0) with at least 4 m/s² rise from dip.
+2. **Low Dip**: Minimum acceleration within 35 samples after peak, must fall below `baseline_mean - DIP_SIGMA * baseline_std` (DIP_SIGMA=1.5) and absolute max of 4 m/s².
+3. **Recovery Peak**: Local maximum within 30 samples after dip, must exceed `baseline_mean + RECOVERY_SIGMA * baseline_std` (RECOVERY_SIGMA=1.0) with at least 8 m/s² rise from dip.
 
 Additional constraints:
-- Peak-to-dip range must exceed `baseline_std * PEAK_TO_DIP_SIGMA` (5.0) and absolute minimum of 6 m/s².
-- Minimum 1500ms between shots (`MIN_SHOT_INTERVAL`).
-- Minimum 80 samples between shots (`MIN_SHOT_SAMPLES`).
+- Peak-to-dip range must exceed `baseline_std * PEAK_TO_DIP_SIGMA` (5.0) and absolute minimum of 12 m/s².
+- Minimum 2000ms between shots (`MIN_SHOT_INTERVAL`).
+- Minimum 60 samples between shots (`MIN_SHOT_SAMPLES`).
 - Baseline computed from 80-sample window ending 20 samples before candidate peak.
+- Baseline std capped at 3.0 for sigma thresholds (`MAX_EFFECTIVE_STD`).
 - Scan window: samples `len-90` to `len-50` (looking ~1-2 seconds back).
+- **Movement-aware**: when baseline std > 2.0 (active movement), stricter thresholds apply: peak ≥ 25, range ≥ 20, rise ≥ 15. Prevents walking/running from triggering false positives.
+- **Retrospective burst filter**: clusters of 3+ shots within 12s of each other are pruned to ~1 per 8s, keeping highest-quality detections. Runs every 60s in live mode and after batch detection.
 
-These thresholds were empirically tuned over 3 days of real-world testing. Adjust carefully.
+These thresholds were empirically tuned over real-world testing with walking, shorts, and various shooting scenarios. Adjust carefully.
 
 ## Court Position System
 
