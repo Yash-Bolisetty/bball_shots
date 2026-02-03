@@ -104,6 +104,7 @@ const Tracker = (() => {
     document.getElementById('btn-export').addEventListener('click', exportSession);
     document.getElementById('btn-motion-cal').addEventListener('click', startMotionCal);
     document.getElementById('btn-voice').addEventListener('click', toggleVoiceLabeling);
+    document.getElementById('btn-label-shot').addEventListener('click', onManualShotLabel);
     document.getElementById('cal-done').addEventListener('click', doneMotionCalStep);
     document.getElementById('cal-skip').addEventListener('click', skipMotionCalStep);
     document.getElementById('cal-cancel').addEventListener('click', cancelMotionCal);
@@ -960,6 +961,10 @@ const Tracker = (() => {
   function toggleVoiceLabeling() {
     if (voiceLabeling) stopVoiceLabeling();
     else startVoiceLabeling();
+  }
+
+  function onManualShotLabel() {
+    onVoiceShotDetected('tap', true);
   }
 
   // ===== Render Loop =====

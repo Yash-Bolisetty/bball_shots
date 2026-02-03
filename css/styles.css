@@ -781,9 +781,26 @@ body {
 }
 
 .voice-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-height: 20px;
   margin-bottom: 6px;
 }
+
+.btn-label-shot {
+  background: var(--green);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-label-shot:active { opacity: 0.6; }
 
 .voice-status {
   font-size: 12px;
