@@ -418,9 +418,13 @@ body {
   flex-shrink: 0;
 }
 
+.shot-log-info-col {
+  flex: 1;
+  min-width: 0;
+}
+
 .shot-log-zone {
   font-weight: 600;
-  min-width: 60px;
 }
 
 .shot-log-mag {
@@ -429,11 +433,37 @@ body {
   font-size: 11px;
 }
 
+.shot-log-consensus {
+  display: flex;
+  gap: 3px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.consensus-dot {
+  font-size: 9px;
+  font-family: var(--mono);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.consensus-dot.vote-yes {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--green);
+}
+
+.consensus-dot.vote-no {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--red);
+}
+
 .shot-log-time {
   margin-left: auto;
   color: var(--text-dim);
   font-family: var(--mono);
   font-size: 11px;
+  align-self: flex-start;
 }
 
 /* ===== Viewer: File Loader ===== */

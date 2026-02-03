@@ -35,6 +35,7 @@ const Tracker = (() => {
   let motionCalTimer = null;
   let motionCalCountdown = 0;
   let motionCalStartTime = 0;
+  let motionCalOwnsSensors = false; // true when cal started its own IMU listener (pre-recording)
 
   // Waveform state
   let waveformCanvas, waveformCtx;
@@ -147,7 +148,6 @@ const Tracker = (() => {
     document.getElementById('btn-calibrate').disabled = false;
     document.getElementById('btn-anchor').disabled = false;
     document.getElementById('btn-export').disabled = false;
-    document.getElementById('btn-motion-cal').disabled = false;
 
     // Load calibration if available
     const cal = MotionCalibrator.load();
@@ -180,7 +180,6 @@ const Tracker = (() => {
     document.getElementById('recording-dot').classList.add('hidden');
     document.getElementById('btn-calibrate').disabled = true;
     document.getElementById('btn-anchor').disabled = true;
-    document.getElementById('btn-motion-cal').disabled = true;
 
     clearInterval(timerInterval);
     window.removeEventListener('devicemotion', onDeviceMotion);
@@ -251,10 +250,12 @@ const Tracker = (() => {
     waveformData.push({ aMag, t: now });
     if (waveformData.length > 500) waveformData.shift();
 
-    // Shot detection
-    const shot = shotDetector.processSample(buffer, now);
-    if (shot) {
-      onShotDetected(shot, now);
+    // Shot detection (suppressed during motion calibration)
+    if (!motionCalActive) {
+      const shot = shotDetector.processSample(buffer, now);
+      if (shot) {
+        onShotDetected(shot, now);
+      }
     }
 
     // GPS calibration sampling
@@ -272,6 +273,17 @@ const Tracker = (() => {
     const dist = Math.sqrt(courtPos.x * courtPos.x + courtPos.y * courtPos.y);
     const color = zoneColor(zone);
 
+    // Build consensus summary if available
+    let consensusSummary = null;
+    if (detection.consensus) {
+      const c = detection.consensus;
+      consensusSummary = {
+        votes: c.votes,
+        total: c.total,
+        methods: c.methods.map(m => ({ name: m.name, vote: m.vote, detail: m.detail })),
+      };
+    }
+
     const shotData = {
       x: courtPos.x,
       y: courtPos.y,
@@ -283,6 +295,8 @@ const Tracker = (() => {
       dipMag: detection.dipMag,
       recoveryMag: detection.recoveryMag,
       range: detection.range,
+      consensus: consensusSummary,
+      calibResult: detection.calibResult || null,
     };
 
     session.addShot(shotData);
@@ -299,6 +313,7 @@ const Tracker = (() => {
       recoveryMagnitude: detection.recoveryMag,
       peakToDipRange: detection.range,
       movementState: movementDetector.isMoving ? 'moving' : 'stationary',
+      consensus: consensusSummary,
     });
 
     // Haptic feedback
@@ -316,10 +331,25 @@ const Tracker = (() => {
     const div = document.createElement('div');
     div.className = 'shot-log-item';
     const elapsed = formatTime(Date.now() - startTime);
+
+    // Build consensus vote display if available
+    let consensusHTML = '';
+    if (shot.consensus) {
+      const dots = shot.consensus.methods.map(m => {
+        const cls = m.vote ? 'vote-yes' : 'vote-no';
+        const shortName = m.name.replace(/^(Window)-\d+/, 'Win').replace(/^(Envelope)-\d+v\d+/, 'Env').replace('DipDepth', 'Dip').replace('Prominence', 'Prom');
+        return `<span class="consensus-dot ${cls}" title="${m.name}: ${m.detail}">${shortName}</span>`;
+      }).join('');
+      consensusHTML = `<div class="shot-log-consensus">${dots}</div>`;
+    }
+
     div.innerHTML = `
       <div class="shot-log-num" style="background:${shot.color}">${num}</div>
-      <div class="shot-log-zone">${shot.zone}</div>
-      <div class="shot-log-mag">pk:${shot.mag.toFixed(1)} dip:${shot.dipMag.toFixed(1)}</div>
+      <div class="shot-log-info-col">
+        <div class="shot-log-zone">${shot.zone}</div>
+        <div class="shot-log-mag">pk:${shot.mag.toFixed(1)} dip:${shot.dipMag.toFixed(1)}</div>
+        ${consensusHTML}
+      </div>
       <div class="shot-log-time">${elapsed}</div>
     `;
     list.insertBefore(div, list.firstChild);
@@ -593,12 +623,55 @@ const Tracker = (() => {
   }
 
   // ===== Motion Calibration Flow =====
-  function startMotionCal() {
-    if (!isRecording || motionCalActive) return;
+  async function startMotionCal() {
+    if (motionCalActive) return;
+
+    // If not recording, we need to start our own IMU listener
+    if (!isRecording) {
+      // Request motion permission on iOS
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        try {
+          const perm = await DeviceMotionEvent.requestPermission();
+          if (perm !== 'granted') {
+            alert('Motion sensor permission denied.');
+            return;
+          }
+        } catch (err) {
+          alert('Motion permission error: ' + err.message);
+          return;
+        }
+      }
+      motionCalOwnsSensors = true;
+      window.addEventListener('devicemotion', onCalibrationMotion);
+    } else {
+      motionCalOwnsSensors = false;
+    }
+
     motionCalActive = true;
     motionCalStep = -1;
     motionCalBuffers = {};
     advanceMotionCalStep();
+  }
+
+  // Dedicated IMU handler for calibration when not recording
+  function onCalibrationMotion(e) {
+    const acc = e.accelerationIncludingGravity;
+    if (!acc || acc.x === null) return;
+
+    const ax = acc.x, ay = acc.y, az = acc.z;
+    const aMag = Math.sqrt(ax * ax + ay * ay + az * az);
+    const rot = e.rotationRate || {};
+    const gx = (rot.alpha || 0) * (Math.PI / 180);
+    const gy = (rot.beta || 0) * (Math.PI / 180);
+    const gz = (rot.gamma || 0) * (Math.PI / 180);
+
+    const sample = { t: Date.now(), ax, ay, az, aMag, gx, gy, gz, moving: false };
+
+    if (motionCalActive && motionCalStep >= 0 && motionCalStep < CALIB_STEPS.length) {
+      const stepKey = CALIB_STEPS[motionCalStep].key;
+      if (!motionCalBuffers[stepKey]) motionCalBuffers[stepKey] = [];
+      motionCalBuffers[stepKey].push(sample);
+    }
   }
 
   function advanceMotionCalStep() {
@@ -630,8 +703,8 @@ const Tracker = (() => {
       else if (idx === motionCalStep) dot.classList.add('active');
     });
 
-    // Haptic feedback for step start
-    if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
+    // Strong haptic between phases: long-short-long pattern
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
 
     // Start countdown timer
     clearInterval(motionCalTimer);
@@ -651,9 +724,9 @@ const Tracker = (() => {
 
     if (motionCalCountdown <= 0) {
       clearInterval(motionCalTimer);
-      if (navigator.vibrate) navigator.vibrate(100);
-      // Brief pause then advance
-      setTimeout(advanceMotionCalStep, 300);
+      // Short buzz to signal step end, then pause before next step's big vibration
+      if (navigator.vibrate) navigator.vibrate([150, 100, 150]);
+      setTimeout(advanceMotionCalStep, 800);
     }
   }
 
@@ -663,18 +736,27 @@ const Tracker = (() => {
     advanceMotionCalStep();
   }
 
+  function stopMotionCalSensors() {
+    if (motionCalOwnsSensors) {
+      window.removeEventListener('devicemotion', onCalibrationMotion);
+      motionCalOwnsSensors = false;
+    }
+  }
+
   function cancelMotionCal() {
     if (!motionCalActive) return;
     clearInterval(motionCalTimer);
     motionCalActive = false;
     motionCalStep = -1;
     motionCalBuffers = {};
+    stopMotionCalSensors();
     document.getElementById('cal-overlay').classList.add('hidden');
   }
 
   function finishMotionCal() {
     clearInterval(motionCalTimer);
     motionCalActive = false;
+    stopMotionCalSensors();
     document.getElementById('cal-overlay').classList.add('hidden');
 
     // Run calibration
